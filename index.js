@@ -109,25 +109,25 @@ if (interaction.channelId !== ALLOWED_CHANNEL_ID) {
   if (Date.now() - last < COOLDOWN_MS) {
     return interaction.editReply("⏳ Faucet cooldown active. Try again later.");
   }
+try {
+  const decimals = await token.decimals();
+  const amount = ethers.parseUnits(FAUCET_AMOUNT, decimals);
 
-  try {
-    const decimals = await token.decimals();
-    const amount = ethers.parseUnits(FAUCET_AMOUNT, decimals);
+  const tx = await token.transfer(wallet, amount);
 
-    const tx = await token.transfer(wallet, amount);
+  claims[wallet] = { last: Date.now(), tx: tx.hash };
+  saveClaims(claims);
 
-    claims[wallet] = { last: Date.now(), tx: tx.hash };
-    saveClaims(claims);
+  await interaction.editReply(
+    `🔥 Sent **${FAUCET_AMOUNT} BBNK** to ${shorten(wallet)}\n` +
+    `Tx: https://monadvision.com/tx/${tx.hash}`
+  );
+} catch (err) {
+  console.error(err);
+  await interaction.editReply("❌ Faucet transaction failed.");
+}
 
-    await interaction.editReply(
-      `🔥 Sent **${FAUCET_AMOUNT} BBNK** to ${shorten(wallet)}\n` +
-      `Tx: https://monadvision.com/tx/${tx.hash}`
-    );
-  } catch (err) {
-    console.error(err);
-    await interaction.editReply("❌ Faucet transaction failed.");
-  }
-});
+}≈
 
 // ============== START ==================
 (async () => {
