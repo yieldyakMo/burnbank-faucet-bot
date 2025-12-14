@@ -15,7 +15,7 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 
 const RPC_URL = process.env.RPC_URL;
-const BBNK_TOKEN = process.env.BBNK_TOKEN;
+const BBNK_TOKEN = process.env.BBNK_TOKEN; // must be a 0x... token contract address
 const FAUCET_PRIVATE_KEY = process.env.FAUCET_PRIVATE_KEY;
 
 const FAUCET_AMOUNT = process.env.FAUCET_AMOUNT || "500";
@@ -38,7 +38,19 @@ function saveCooldowns(data) {
   fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(data, null, 2));
 }
 
+function requireEnv(name, value) {
+  if (!value) {
+    console.error(`❌ Missing required env var: ${name}`);
+    process.exit(1);
+  }
+  return value;
+}
+
 // ================= BLOCKCHAIN =================
+requireEnv("RPC_URL", RPC_URL);
+requireEnv("BBNK_TOKEN", BBNK_TOKEN);
+requireEnv("FAUCET_PRIVATE_KEY", FAUCET_PRIVATE_KEY);
+
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(FAUCET_PRIVATE_KEY, provider);
 
@@ -52,7 +64,13 @@ const token = new ethers.Contract(BBNK_TOKEN, erc20Abi, wallet);
 // ================= COMMAND =================
 const faucetCommand = new SlashCommandBuilder()
   .setName("faucet")
-  .setDescription("Claim BurnBank (BBNK) tokens");
+  .setDescription("Claim BurnBank (BBNK) tokens")
+  .addStringOption((opt) =>
+    opt
+      .setName("address")
+      .setDescription("Your wallet address (0x...)")
+      .setRequired(true)
+  );
 
 // ================= REGISTER =================
 async function registerCommands() {
@@ -74,6 +92,7 @@ client.on("interactionCreate", async (interaction) => {
   const cooldowns = loadCooldowns();
   const now = Date.now();
 
+  // Cooldown check (keyed by Discord user id)
   if (cooldowns[userId]) {
     const elapsed = (now - cooldowns[userId]) / (1000 * 60 * 60);
     if (elapsed < COOLDOWN_HOURS) {
@@ -85,20 +104,30 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 
+  // Get & validate wallet address
+  const to = interaction.options.getString("address", true).trim();
+
+  if (!ethers.isAddress(to)) {
+    return interaction.reply({
+      content: "❌ Invalid address. Please provide a valid 0x... wallet address.",
+      ephemeral: true,
+    });
+  }
+
   try {
     await interaction.deferReply({ ephemeral: true });
 
     const decimals = await token.decimals();
     const amount = ethers.parseUnits(FAUCET_AMOUNT, decimals);
 
-    const tx = await token.transfer(interaction.user.id, amount);
+    const tx = await token.transfer(to, amount);
     await tx.wait();
 
     cooldowns[userId] = now;
     saveCooldowns(cooldowns);
 
     await interaction.editReply(
-      `🔥 **${FAUCET_AMOUNT} BBNK** sent!\nTx: ${tx.hash}`
+      `🔥 **${FAUCET_AMOUNT} BBNK** sent to:\n\`${to}\`\nTx: ${tx.hash}`
     );
   } catch (err) {
     console.error(err);
@@ -108,10 +137,8 @@ client.on("interactionCreate", async (interaction) => {
 
 // ================= START =================
 (async () => {
-  if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID) {
-    console.error("❌ Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in .env");
-    process.exit(1);
-  }
+  requireEnv("DISCORD_TOKEN", DISCORD_TOKEN);
+  requireEnv("DISCORD_CLIENT_ID", DISCORD_CLIENT_ID);
 
   await registerCommands();
   await client.login(DISCORD_TOKEN);
