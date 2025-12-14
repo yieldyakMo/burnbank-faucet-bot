@@ -1,7 +1,13 @@
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require("discord.js");
+const {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+} = require("discord.js");
 const { ethers } = require("ethers");
 
 // ================= CONFIG =================
@@ -14,128 +20,99 @@ const FAUCET_PRIVATE_KEY = process.env.FAUCET_PRIVATE_KEY;
 
 const FAUCET_AMOUNT = process.env.FAUCET_AMOUNT || "500";
 const COOLDOWN_HOURS = Number(process.env.COOLDOWN_HOURS || "24");
-const COOLDOWN_MS = COOLDOWN_HOURS * 60 * 60 * 1000;
 
-const CLAIMS_FILE = path.join(__dirname, "claims.json");
+const COOLDOWN_FILE = path.join(__dirname, "cooldowns.json");
 
-// =============== ERC20 ABI ===============
-const ERC20_ABI = [
-  "function decimals() view returns (uint8)",
-  "function balanceOf(address) view returns (uint256)",
+// ================= CLIENT =================
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
+
+// ================= HELPERS =================
+function loadCooldowns() {
+  if (!fs.existsSync(COOLDOWN_FILE)) return {};
+  return JSON.parse(fs.readFileSync(COOLDOWN_FILE, "utf8"));
+}
+
+function saveCooldowns(data) {
+  fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(data, null, 2));
+}
+
+// ================= BLOCKCHAIN =================
+const provider = new ethers.JsonRpcProvider(RPC_URL);
+const wallet = new ethers.Wallet(FAUCET_PRIVATE_KEY, provider);
+
+const erc20Abi = [
   "function transfer(address to, uint256 amount) returns (bool)",
+  "function decimals() view returns (uint8)",
 ];
 
-// =============== HELPERS ==================
-function loadClaims() {
-  if (!fs.existsSync(CLAIMS_FILE)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(CLAIMS_FILE, "utf8"));
-  } catch {
-    return {};
-  }
-}
+const token = new ethers.Contract(BBNK_TOKEN, erc20Abi, wallet);
 
-function saveClaims(data) {
-  fs.writeFileSync(CLAIMS_FILE, JSON.stringify(data, null, 2));
-}
-
-function isValidAddress(addr) {
-  try {
-    return ethers.isAddress(addr);
-  } catch {
-    return false;
-  }
-}
-
-function shorten(addr) {
-  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-}
-
-// ============== BLOCKCHAIN ===============
-const provider = new ethers.JsonRpcProvider(RPC_URL);
-const signer = new ethers.Wallet(FAUCET_PRIVATE_KEY, provider);
-const token = new ethers.Contract(BBNK_TOKEN, ERC20_ABI, signer);
-
-// ============== DISCORD ==================
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
+// ================= COMMAND =================
 const faucetCommand = new SlashCommandBuilder()
   .setName("faucet")
-  .setDescription("Claim BBNK from the BurnBank faucet")
-  .addStringOption((opt) =>
-    opt.setName("wallet").setDescription("Your wallet address").setRequired(true)
-  );
+  .setDescription("Claim BurnBank (BBNK) tokens");
 
+// ================= REGISTER =================
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+
   await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID), {
     body: [faucetCommand.toJSON()],
   });
-  console.log("✅ Slash command registered");
+
+  console.log("✅ Slash commands registered");
 }
 
-client.once("ready", () => {
-  console.log(`🤖 Logged in as ${client.user.tag}`);
-});
-
-  client.on("interactionCreate", async (interaction) => {
-  const ALLOWED_CHANNEL_ID = "1449497696351158293";
-
-if (interaction.channelId !== ALLOWED_CHANNEL_ID) {
-  // block
-}
-    await interaction.reply({
-      content: "❌ Please use the faucet in #faucet only.",
-      ephemeral: true,
-    });
-    return;
-  }
-
+// ================= INTERACTION =================
+client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName !== "faucet") return;
 
-  await interaction.deferReply({ ephemeral: true });
+  const userId = interaction.user.id;
+  const cooldowns = loadCooldowns();
+  const now = Date.now();
 
-  const wallet = interaction.options.getString("wallet");
-
-
-  if (!isValidAddress(wallet)) {
-    return interaction.editReply("❌ Invalid wallet address.");
+  if (cooldowns[userId]) {
+    const elapsed = (now - cooldowns[userId]) / (1000 * 60 * 60);
+    if (elapsed < COOLDOWN_HOURS) {
+      const remaining = (COOLDOWN_HOURS - elapsed).toFixed(1);
+      return interaction.reply({
+        content: `⏳ You must wait ${remaining} more hours before using the faucet again.`,
+        ephemeral: true,
+      });
+    }
   }
 
-  const claims = loadClaims();
-  const last = claims[wallet]?.last || 0;
+  try {
+    await interaction.deferReply({ ephemeral: true });
 
-  if (Date.now() - last < COOLDOWN_MS) {
-    return interaction.editReply("⏳ Faucet cooldown active. Try again later.");
+    const decimals = await token.decimals();
+    const amount = ethers.parseUnits(FAUCET_AMOUNT, decimals);
+
+    const tx = await token.transfer(interaction.user.id, amount);
+    await tx.wait();
+
+    cooldowns[userId] = now;
+    saveCooldowns(cooldowns);
+
+    await interaction.editReply(
+      `🔥 **${FAUCET_AMOUNT} BBNK** sent!\nTx: ${tx.hash}`
+    );
+  } catch (err) {
+    console.error(err);
+    await interaction.editReply("❌ Faucet error. Please try again later.");
   }
-try {
-  const decimals = await token.decimals();
-  const amount = ethers.parseUnits(FAUCET_AMOUNT, decimals);
+});
 
-  const tx = await token.transfer(wallet, amount);
-
-  claims[wallet] = { last: Date.now(), tx: tx.hash };
-  saveClaims(claims);
-
-  await interaction.editReply(
-    `🔥 Sent **${FAUCET_AMOUNT} BBNK** to ${shorten(wallet)}\n` +
-    `Tx: https://monadvision.com/tx/${tx.hash}`
-  );
-} catch (err) {
-  console.error(err);
-  await interaction.editReply("❌ Faucet transaction failed.");
-}
-
-}≈
-
-// ============== START ==================
+// ================= START =================
 (async () => {
   if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID) {
     console.error("❌ Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in .env");
     process.exit(1);
   }
+
   await registerCommands();
   await client.login(DISCORD_TOKEN);
 })();
-
